@@ -2,7 +2,7 @@
 
 **Afrobeats vs Latin Pop — Global Asset Retention & Identity Density Index**
 
-A six-month comparative Spotify streaming analysis across 26 tracks (13 Afrobeats, 13 Latin Pop) from 2019 to 2024. Exponential decay modelling, city-level audience geography, and Spotify-only catalogue valuation.
+A one-month comparative Spotify streaming analysis across 26 tracks (13 Afrobeats, 13 Latin Pop) from 2019 to 2024. Exponential decay modelling, city-level audience geography, and Spotify-only catalogue valuation.
 
 **By Ekene Ahuche · Hipstarr Music Research · Lagos, 2026**
 **[@ekenemike_](https://x.com/ekenemike_) · [ekenemike.substack.com](https://ekenemike.substack.com)**
