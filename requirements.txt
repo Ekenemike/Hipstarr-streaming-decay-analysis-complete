@@ -1,0 +1,230 @@
+"""
+Hipstarr Music Research
+Script 03 — Identity Density Index (IDI)
+=========================================
+
+WHAT THIS SCRIPT DOES (plain English):
+  Retention alone doesn't tell the full story of a track's catalogue value.
+  A track with 60% retention but only 5,000 listeners isn't more valuable
+  than one with 35% retention and 5 million listeners.
+
+  The Identity Density Index (IDI) is a composite score (0 to 100) that
+  combines three dimensions into one number:
+
+    Retention (50%)   — how many Spotify listeners stayed after 6 months
+    Editorial (25%)   — how many Spotify editorial playlists supported it
+                        and what their reach was (log-scaled)
+    Dispersion (25%)  — how spread out the audience is globally
+                        vs concentrated in one city
+
+  A high IDI means: deep loyalty + strong institutional support + global spread.
+  Calm Down Remix is the only Afrobeats track in Tier 1.
+
+HOW TO RUN:   python3 03_identity_density_index.py
+NEEDS:        Nothing — all data is hardcoded from the master tracker
+PRODUCES:     outputs/idi_scores.csv
+              outputs/idi_chart.png
+"""
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.patheffects import withStroke
+
+os.makedirs('outputs', exist_ok=True)
+
+# ── COLOUR PALETTE ────────────────────────────────────────────────────────────
+AFRO  = "#FF6B35"
+LATIN = "#4ECDC4"
+GOLD  = "#D4AF37"
+BG    = "#080808"
+W     = "#F0EEF8"
+
+plt.rcParams.update({
+    "figure.facecolor": BG, "axes.facecolor": BG, "axes.edgecolor": "#2a2a2a",
+    "axes.labelcolor": "#aaa", "xtick.color": "#888", "ytick.color": W,
+    "text.color": W, "grid.color": "#181818", "font.family": "monospace", "font.size": 10,
+})
+
+# ── MASTER TRACK DATA ─────────────────────────────────────────────────────────
+# Columns: (track_name, genre, 6m_retention_%, editorial_playlist_reach, top_city_density_%)
+#
+# editorial_playlist_reach: total follower count across all editorial playlists
+#   that featured this track (from Chartmetric Professional)
+# top_city_density_pct: what percentage of the track's Spotify audience
+#   is in its single largest streaming city
+#   — high density means concentration, low density means global spread
+TRACKS = [
+    # AFROBEATS
+    ("Essence",             "Afrobeats", 39.0,   5_300_000,  35.7),
+    ("Love Nwantiti",       "Afrobeats", 32.71,  7_100_000,  41.97),
+    ("Ku Lo Sa",            "Afrobeats", 29.73,  5_593_000,  48.97),
+    ("Peru Original",       "Afrobeats",  0.0,     512_915,  52.8),
+    ("Peru Remix",          "Afrobeats", 39.94,  6_208_572,  39.11),
+    ("Last Last",           "Afrobeats", 36.58,  3_500_000,  40.76),
+    ("It's Plenty",         "Afrobeats", 27.92,    395_000,  43.86),
+    ("Rush",                "Afrobeats", 29.6,   4_600_000,  45.80),
+    ("Calm Down Remix",     "Afrobeats", 48.17, 42_300_000,  15.70),
+    ("Soundgasm",           "Afrobeats", 44.12,  1_400_000,  41.29),
+    ("Soso",                "Afrobeats", 58.80,    487_500,  49.19),
+    ("Attention",           "Afrobeats",  0.0,     537_800,  32.06),
+    ("Unavailable",         "Afrobeats", 12.21, 15_700_000,  31.16),
+    # LATIN POP
+    ("Yonaguni",            "Latin Pop", 44.79,  1_900_000,   7.02),
+    ("El Apagón",           "Latin Pop",  0.0,   1_400_000,   6.32),
+    ("Moscow Mule",         "Latin Pop", 28.71,  9_100_000,   6.92),
+    ("Tití Me Preguntó",    "Latin Pop", 53.23, 28_900_000,   6.26),
+    ("Me Porto Bonito",     "Latin Pop", 46.53, 19_100_000,   8.83),
+    ("Provenza",            "Latin Pop", 52.32, 23_800_000,   7.04),
+    ("Bzrp Vol. 52",        "Latin Pop", 26.11, 36_200_000,  15.70),
+    ("Bzrp Vol. 53",        "Latin Pop", 10.88, 17_300_000,  14.81),
+    ("TQG",                 "Latin Pop", 18.53, 23_600_000,   6.54),
+    ("Bichota",             "Latin Pop", 22.96,  2_400_000,   6.52),
+    ("Telepatía",           "Latin Pop", 28.58, 13_700_000,  12.13),
+    ("Todo De Ti",          "Latin Pop", 25.26, 28_200_000,   7.37),
+    ("Neverita",            "Latin Pop", 71.74,  3_000_000,   6.84),
+]
+
+
+def compute_idi(tracks):
+    """
+    Calculate the IDI score for each track.
+
+    Each component is first normalised to a 0-100 scale:
+
+    Retention score: already a 0-100 percentage, used directly.
+
+    Editorial score: raw reach values vary enormously (400k to 42M).
+    We log-transform first (log(1 + reach)) to prevent one outlier
+    (Calm Down Remix at 42M) from compressing every other track to near-zero.
+    Then normalise the log values to a 0-100 scale across the sample.
+
+    Dispersion score: a higher top-city density means a MORE concentrated
+    audience, which is LESS desirable for global catalogue value.
+    So we invert it: (1 - density/100) * 100 means a track with 10% top-city
+    concentration scores 90 on dispersion, while one with 52% scores 48.
+
+    Final IDI = (retention * 0.50) + (editorial * 0.25) + (dispersion * 0.25)
+    """
+    df = pd.DataFrame(tracks, columns=["Track", "Genre", "Retention", "EditorialReach", "TopCityDensity"])
+
+    # ── COMPONENT 1: Retention score ─────────────────────────────────────────
+    # Clip to 0–100 in case of any data anomalies
+    df["Retention_Score"] = df["Retention"].clip(0, 100)
+
+    # ── COMPONENT 2: Editorial reach score ───────────────────────────────────
+    # Log transform to compress the extremely wide range (400k to 42M)
+    log_reach = np.log1p(df["EditorialReach"])
+    # Normalise: 0 = lowest in sample, 100 = highest in sample
+    df["Editorial_Score"] = (
+        (log_reach - log_reach.min()) /
+        (log_reach.max() - log_reach.min()) * 100
+    )
+
+    # ── COMPONENT 3: Audience dispersion score ────────────────────────────────
+    # Invert the density: lower concentration = higher dispersion score
+    # A track with Lagos at 49% of audience = dispersion score of 51
+    # A track with Mexico City at 7% of audience = dispersion score of 93
+    df["Dispersion_Score"] = (1 - df["TopCityDensity"] / 100) * 100
+
+    # ── COMBINED IDI ─────────────────────────────────────────────────────────
+    df["IDI"] = (
+        df["Retention_Score"]  * 0.50 +
+        df["Editorial_Score"]  * 0.25 +
+        df["Dispersion_Score"] * 0.25
+    ).round(2)
+
+    # assign a tier label based on IDI score
+    def assign_tier(idi):
+        if idi >= 70: return "Tier 1  Premium Asset"
+        if idi >= 50: return "Tier 2  Stable Asset"
+        if idi >= 30: return "Tier 3  Developing Asset"
+        return           "Tier 4  Volatile Asset"
+
+    df["Tier"] = df["IDI"].apply(assign_tier)
+    return df.sort_values("IDI", ascending=False).reset_index(drop=True)
+
+
+def add_branding(fig):
+    """Add Hipstarr brand name and handles to the bottom of the chart."""
+    outline = [withStroke(linewidth=4, foreground="black")]
+    fig.text(0.015, 0.012, "HIPSTARR MUSIC RESEARCH",
+             ha='left', va='bottom', fontsize=11, color=GOLD,
+             fontweight='bold', fontfamily='monospace', path_effects=outline)
+    fig.text(0.985, 0.012, "@ekenemike_   ekenemike.substack.com   tiktok @ekenemike_",
+             ha='right', va='bottom', fontsize=9.5, color="#999",
+             fontfamily='monospace', path_effects=outline)
+
+
+def main():
+    print("=== Script 03: Identity Density Index ===\n")
+
+    # compute scores for all 26 tracks
+    df = compute_idi(TRACKS)
+
+    # save to CSV
+    df.to_csv('outputs/idi_scores.csv', index=False)
+
+    # print results table to terminal
+    print(f"  {'Track':<24} {'Genre':<12} {'Ret%':>6} {'IDI':>6}  Tier")
+    print("  " + "-" * 65)
+    for _, row in df.iterrows():
+        print(f"  {row['Track']:<24} {row['Genre']:<12} "
+              f"{row['Retention']:>5.1f}% {row['IDI']:>6.2f}  {row['Tier']}")
+
+    # print genre averages
+    for genre in ["Afrobeats", "Latin Pop"]:
+        gdf = df[df.Genre == genre]
+        print(f"\n{genre}: IDI avg={gdf['IDI'].mean():.2f}  Retention avg={gdf['Retention'].mean():.2f}%")
+
+    # ── BUILD THE CHART ───────────────────────────────────────────────────────
+    # Horizontal bar chart sorted by IDI score (highest at top)
+    colors = [AFRO if g == "Afrobeats" else LATIN for g in df.Genre]
+
+    fig, ax = plt.subplots(figsize=(15, 11))
+
+    bars = ax.barh(range(len(df)), df.IDI, color=colors, height=.70, alpha=.88)
+
+    # label each bar with its score
+    for i, (bar, (_, row)) in enumerate(zip(bars, df.iterrows())):
+        ax.text(bar.get_width() + .3, i, f"{row['IDI']:.1f}",
+                va='center', fontsize=10, color="#bbb")
+
+    ax.set_yticks(range(len(df)))
+    ax.set_yticklabels(
+        [f"{r['Track']}  ({r['Genre']})" for _, r in df.iterrows()],
+        fontsize=10.5, color=W)
+
+    # vertical lines at tier thresholds
+    for threshold, tier_label in [(70, "Tier 1"), (50, "Tier 2"), (30, "Tier 3")]:
+        ax.axvline(threshold, color='#333', lw=1, ls='--', alpha=.8)
+        ax.text(threshold + .3, len(df) - .3, tier_label,
+                fontsize=8, color="#444", va='top')
+
+    ax.set_xlabel("IDI Score (0 to 100)", fontsize=11, color="#aaa", labelpad=10)
+    ax.set_title(
+        "IDENTITY DENSITY INDEX  Catalogue Quality Score\n"
+        "Retention 50%   +   Editorial Reach 25%   +   Audience Spread 25%",
+        color=GOLD, fontsize=14, fontweight='bold', loc='left', pad=14)
+    ax.spines[["top", "right", "bottom"]].set_visible(False)
+    ax.grid(axis='x', alpha=.12)
+    ax.tick_params(labelsize=10, colors=W)
+    ax.legend(
+        handles=[mpatches.Patch(color=AFRO, label='Afrobeats'),
+                 mpatches.Patch(color=LATIN, label='Latin Pop')],
+        framealpha=0, labelcolor=W, fontsize=11)
+
+    add_branding(fig)
+    plt.tight_layout(rect=[0, .055, 1, 1])
+    plt.savefig('outputs/idi_chart.png', dpi=200, bbox_inches='tight', facecolor=BG)
+    plt.close()
+    print("\nSaved: outputs/idi_scores.csv")
+    print("Saved: outputs/idi_chart.png")
+
+
+if __name__ == "__main__":
+    main()

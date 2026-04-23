@@ -1,0 +1,287 @@
+"""
+Hipstarr Music Research
+Script 04 — Spotify-Only Catalogue Valuation Model
+====================================================
+
+WHAT THIS SCRIPT DOES (plain English):
+  This script puts a Spotify-only dollar estimate on each track's catalogue value.
+
+  IMPORTANT: These estimates are based on Spotify streaming data only.
+  They do NOT include Apple Music, YouTube Music, Tidal, Amazon Music,
+  or any other platform. Total real-world rights values would be higher.
+
+  How it works — three steps:
+  1. Blended rate: work out how much each track earns per Spotify stream
+     based on WHERE its listeners are. A US subscriber generates roughly
+     $0.004 per stream. A Nigerian free-tier listener generates roughly
+     $0.0004 per stream — 10x less. We weight by the track's audience geography.
+
+  2. Annual revenue: estimate current Spotify earnings using the 6-month
+     retention rate to scale the peak-year stream count down to a realistic
+     current-year figure.
+
+  3. Catalogue multiple: multiply by the industry-standard number of years
+     of income a catalogue buyer would pay. High-retention tracks (40%+)
+     attract a 20x multiple. Tracks below 25% retention get 10x.
+
+  Example: Soso earns ~$120k/year on Spotify and qualifies for a 20x multiple
+  because its retention is 58.8%. Estimated Spotify catalogue value: ~$2.5M.
+  Not because it is a massive hit — because its audience is unusually loyal.
+
+DISCLAIMER:
+  Spotify-only modelled estimates. Does not include Apple Music, YouTube Music,
+  Tidal, or other DSPs. Not confirmed earnings, deal terms, or rights valuations.
+
+HOW TO RUN:   python3 04_catalogue_valuation.py
+NEEDS:        Nothing — all data is hardcoded
+PRODUCES:     outputs/valuation_26tracks.csv
+              outputs/catalogue_valuation.png
+"""
+
+import os
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib.gridspec import GridSpec
+from matplotlib.patheffects import withStroke
+
+os.makedirs('outputs', exist_ok=True)
+
+# ── COLOUR PALETTE ────────────────────────────────────────────────────────────
+AFRO  = "#FF6B35"
+LATIN = "#4ECDC4"
+GOLD  = "#D4AF37"
+BG    = "#080808"
+W     = "#F0EEF8"
+
+plt.rcParams.update({
+    "figure.facecolor": BG, "axes.facecolor": BG, "axes.edgecolor": "#2a2a2a",
+    "axes.labelcolor": "#aaa", "xtick.color": "#888", "ytick.color": W,
+    "text.color": W, "grid.color": "#181818", "font.family": "monospace", "font.size": 10,
+})
+
+# ── SPOTIFY PER-STREAM ROYALTY RATE ASSUMPTIONS (USD) ─────────────────────────
+# These are industry-average Spotify rates, not guaranteed actuals.
+# Source: widely reported streaming royalty benchmarks (2022–2024 period).
+R_HIGH  = 0.0040   # High-yield markets: US, UK, France, Germany, Australia, Canada
+R_LATAM = 0.0022   # Latin American markets: Mexico, Argentina, Chile, Colombia, Peru
+R_NG    = 0.0004   # Nigeria — predominantly free tier, very low payout rate
+R_OTHER = 0.0020   # All other markets: South Africa, Netherlands, etc.
+
+# ── CATALOGUE VALUE MULTIPLES ─────────────────────────────────────────────────
+# Industry-standard range for active music catalogue acquisitions.
+# A buyer pays X years of current annual income upfront.
+M_PREMIUM  = 20   # retention >= 40% — loyal audience, predictable income stream
+M_STABLE   = 16   # retention 25–40% — solid but not elite
+M_VOLATILE = 10   # retention < 25%  — event-driven, uncertain future income
+
+# ── TRACK DATA ────────────────────────────────────────────────────────────────
+# Format per track:
+#   (total_spotify_streams, %high_yield_mkt, %latam_mkt, %nigeria, %other, 6m_retention)
+#
+# The four market percentages reflect each track's Spotify audience geography.
+# They are derived from Chartmetric Professional city/country audience breakdowns.
+# All four should add up to approximately 1.0.
+TRACKS = {
+    # ── AFROBEATS ─────────────────────────────────────────────────────────────
+    "Attention":        (124e6,   0.12, 0.02, 0.32, 0.54,  0.0),
+    "Calm Down Remix":  (1847e6,  0.38, 0.12, 0.16, 0.34, 48.17),
+    "Essence":          (300e6,   0.12, 0.02, 0.35, 0.51, 39.0),
+    "It's Plenty":      (45e6,    0.04, 0.01, 0.44, 0.51, 27.92),
+    "Ku Lo Sa":         (180e6,   0.10, 0.01, 0.49, 0.40, 29.73),
+    "Last Last":        (310e6,   0.14, 0.02, 0.41, 0.43, 36.58),
+    "Love Nwantiti":    (492e6,   0.18, 0.02, 0.42, 0.38, 32.71),
+    "Peru Original":    (80e6,    0.08, 0.01, 0.53, 0.38,  0.0),
+    "Peru Remix":       (280e6,   0.12, 0.02, 0.39, 0.47, 39.94),
+    "Rush":             (533e6,   0.09, 0.02, 0.46, 0.43, 29.6),
+    "Soso":             (381e6,   0.03, 0.01, 0.49, 0.47, 58.80),
+    "Soundgasm":        (222e6,   0.05, 0.01, 0.41, 0.53, 44.12),
+    "Unavailable":      (130e6,   0.05, 0.01, 0.31, 0.63, 12.21),
+    # ── LATIN POP ─────────────────────────────────────────────────────────────
+    "Bichota":          (750e6,   0.07, 0.72, 0.00, 0.21, 22.96),
+    "Bzrp Vol. 52":     (1700e6,  0.08, 0.72, 0.00, 0.20, 26.11),
+    "Bzrp Vol. 53":     (2500e6,  0.09, 0.68, 0.00, 0.23, 10.88),
+    "El Apagón":        (180e6,   0.08, 0.75, 0.00, 0.17,  0.0),
+    "Me Porto Bonito":  (1300e6,  0.09, 0.69, 0.00, 0.22, 46.53),
+    "Moscow Mule":      (2100e6,  0.09, 0.72, 0.00, 0.19, 28.71),
+    "Neverita":         (850e6,   0.08, 0.70, 0.00, 0.22, 71.74),
+    "Provenza":         (900e6,   0.08, 0.71, 0.00, 0.21, 52.32),
+    "Telepatía":        (800e6,   0.19, 0.55, 0.00, 0.26, 28.58),
+    "Tití Me Preguntó": (1400e6,  0.10, 0.68, 0.00, 0.22, 53.23),
+    "Todo De Ti":       (1600e6,  0.09, 0.71, 0.00, 0.20, 25.26),
+    "TQG":              (1800e6,  0.09, 0.70, 0.00, 0.21, 18.53),
+    "Yonaguni":         (1200e6,  0.10, 0.70, 0.00, 0.20, 44.79),
+}
+
+# set of Afrobeats track names — used to assign genre in the output table
+AFRO_SET = {
+    "Attention", "Calm Down Remix", "Essence", "It's Plenty", "Ku Lo Sa",
+    "Last Last", "Love Nwantiti", "Peru Original", "Peru Remix", "Rush",
+    "Soso", "Soundgasm", "Unavailable",
+}
+
+
+def add_branding(fig):
+    """Add Hipstarr brand name and handles to the bottom of the chart."""
+    outline = [withStroke(linewidth=4, foreground="black")]
+    fig.text(0.015, 0.012, "HIPSTARR MUSIC RESEARCH",
+             ha='left', va='bottom', fontsize=11, color=GOLD,
+             fontweight='bold', fontfamily='monospace', path_effects=outline)
+    fig.text(0.985, 0.012, "@ekenemike_   ekenemike.substack.com   tiktok @ekenemike_",
+             ha='right', va='bottom', fontsize=9.5, color="#999",
+             fontfamily='monospace', path_effects=outline)
+
+
+def main():
+    print("=== Script 04: Spotify-Only Catalogue Valuation ===\n")
+    print("NOTE: Spotify-only estimates.")
+    print("      Excludes Apple Music, YouTube Music, Tidal and other DSPs.\n")
+
+    rows = []
+
+    for name, (streams, ph, pl, pn, po, ret) in TRACKS.items():
+        genre = "Afrobeats" if name in AFRO_SET else "Latin Pop"
+
+        # ── STEP 1: blended Spotify per-stream rate ───────────────────────────
+        # Weighted average of the four market rates based on audience geography.
+        # A track with 38% US audience earns much more per stream than one
+        # with 49% Nigerian audience, even if total streams are similar.
+        rate = (ph * R_HIGH) + (pl * R_LATAM) + (pn * R_NG) + (po * R_OTHER)
+
+        # ── STEP 2: estimated current annual Spotify revenue ──────────────────
+        # Assumption: peak year = roughly 2.5x the current annual stream rate.
+        # We divide total streams by 2.5 to get a proxy for peak-year streams,
+        # then apply the retention rate to scale down to today's audience size.
+        annual_rev = (streams / 2.5) * (ret / 100) * rate
+
+        # ── STEP 3: catalogue multiple based on retention tier ─────────────────
+        multiple = M_PREMIUM if ret >= 40 else M_STABLE if ret >= 25 else M_VOLATILE
+
+        # catalogue value = annual revenue × multiple
+        catalogue_value = annual_rev * multiple
+
+        rows.append({
+            "Track":                    name,
+            "Genre":                    genre,
+            "Total_Spotify_Streams":    int(streams),
+            "Retention_Pct":            ret,
+            "Blended_Spotify_Rate":     round(rate, 5),
+            "Spotify_Lifetime_Rev":     round(streams * rate),
+            "Spotify_Annual_Rev":       round(annual_rev),
+            "Multiple":                 multiple,
+            "Spotify_Catalogue_Value":  round(catalogue_value),
+        })
+
+    # sort by catalogue value descending for the results table
+    df = pd.DataFrame(rows).sort_values("Spotify_Catalogue_Value", ascending=False)
+    df.to_csv('outputs/valuation_26tracks.csv', index=False)
+
+    # print results to terminal
+    print(f"  {'Track':<22} {'Genre':<12} {'Annual Rev':>14} {'Mult':>5} {'Value':>14}")
+    print("  " + "-" * 72)
+    for _, r in df.iterrows():
+        print(f"  {r['Track']:<22} {r['Genre']:<12} "
+              f"${r['Spotify_Annual_Rev']:>13,.0f} {r['Multiple']:>4}x "
+              f"${r['Spotify_Catalogue_Value']:>13,.0f}")
+
+    # genre totals
+    afro_val  = df[df.Genre == "Afrobeats"]["Spotify_Catalogue_Value"].sum()
+    latin_val = df[df.Genre == "Latin Pop"]["Spotify_Catalogue_Value"].sum()
+    print(f"\n  Afrobeats Spotify total: ${afro_val:>14,.0f}")
+    print(f"  Latin Pop Spotify total: ${latin_val:>14,.0f}")
+    print(f"  Gap: {latin_val/afro_val:.1f}x  (driven by stream volume, not royalty rates)")
+    print(f"\n  DISCLAIMER: Spotify only. Total multi-platform value would be higher.")
+
+    # ── BUILD THE CHART ───────────────────────────────────────────────────────
+    # Two-panel layout: per-track bars on the left, donut chart on the right
+    fig  = plt.figure(figsize=(20, 11))
+    gs   = GridSpec(1, 3, figure=fig, wspace=.30)
+
+    # ── Left panel: per-track bar chart ──────────────────────────────────────
+    ax1 = fig.add_subplot(gs[0, :2])   # takes up 2/3 of the width
+    dv   = df.sort_values('Spotify_Catalogue_Value')   # ascending so bars grow upward
+    clrs = [AFRO if g == "Afrobeats" else LATIN for g in dv.Genre]
+
+    bars = ax1.barh(range(len(dv)), dv.Spotify_Catalogue_Value / 1e6,
+                    color=clrs, height=.72, alpha=.88)
+
+    # label each bar with dollar value
+    for i, (bar, (_, row)) in enumerate(zip(bars, dv.iterrows())):
+        w = bar.get_width()
+        if w > .6:
+            # label inside bar if wide enough
+            ax1.text(w - .05, i, f"${w:.1f}M", va='center', ha='right',
+                     fontsize=9.5, color=BG, fontweight='bold')
+        else:
+            # label outside if bar too narrow
+            ax1.text(w + .02, i, f"${w:.2f}M", va='center', ha='left',
+                     fontsize=9, color="#888")
+
+    ax1.set_yticks(range(len(dv)))
+    ax1.set_yticklabels(dv.Track, fontsize=11, color=W)
+    ax1.set_xlabel("Estimated Spotify Catalogue Value (USD millions)",
+                   fontsize=11, color="#aaa", labelpad=10)
+    ax1.set_title("ESTIMATED SPOTIFY CATALOGUE VALUE PER TRACK",
+                  color=GOLD, fontsize=13, fontweight='bold', loc='left', pad=12)
+    ax1.spines[["top", "right", "bottom"]].set_visible(False)
+    ax1.grid(axis='x', alpha=.12)
+    ax1.tick_params(labelsize=10, colors=W)
+    ax1.legend(
+        handles=[mpatches.Patch(color=AFRO, label='Afrobeats'),
+                 mpatches.Patch(color=LATIN, label='Latin Pop')],
+        framealpha=0, labelcolor=W, fontsize=10, loc='lower right')
+
+    # ── Right panel: donut chart showing genre totals ─────────────────────────
+    ax2 = fig.add_subplot(gs[0, 2])
+    wedges, texts, autos = ax2.pie(
+        [afro_val, latin_val],
+        labels=[f"Afrobeats\n${afro_val/1e6:.1f}M", f"Latin Pop\n${latin_val/1e6:.1f}M"],
+        colors=[AFRO, LATIN],
+        autopct='%1.0f%%',
+        startangle=90,
+        wedgeprops=dict(width=.55, edgecolor=BG, linewidth=3),   # hollow centre
+        textprops=dict(color=W, fontsize=12, fontfamily='monospace'))
+
+    # style the percentage labels inside the wedges
+    for auto in autos:
+        auto.set_fontsize(13)
+        auto.set_fontweight('bold')
+        auto.set_color(BG)
+
+    ax2.set_title(f"GENRE TOTALS\n${(afro_val+latin_val)/1e6:.0f}M Combined",
+                  color=GOLD, fontsize=12, fontweight='bold', pad=12)
+    # gap ratio in the centre of the donut
+    ax2.text(0, 0, "3x\nGap", ha='center', va='center',
+             fontsize=14, color=GOLD, fontweight='bold', fontfamily='monospace')
+
+    # methodology note in the bottom-right area
+    fig.text(.66, .04,
+        "SPOTIFY-ONLY ESTIMATE\n"
+        "Excludes Apple Music, YouTube Music,\n"
+        "Tidal and all other DSPs.\n\n"
+        "Method: blended Spotify rates by audience\n"
+        "geography × retention-adjusted annual streams\n"
+        "× industry multiples (10× to 20×).\n\n"
+        "Not confirmed earnings or deal terms.",
+        ha='left', va='bottom', fontsize=8.5, color="#555", fontfamily='monospace',
+        bbox=dict(boxstyle='round,pad=0.5', facecolor='#111',
+                  edgecolor='#2a2a2a', alpha=.95))
+
+    add_branding(fig)
+    fig.suptitle(
+        "SPOTIFY-ONLY CATALOGUE VALUATION\n"
+        "26 Tracks: Afrobeats vs Latin Pop  2019 to 2024",
+        color=GOLD, fontsize=14, fontweight='bold', x=.02, ha='left', y=1.02)
+
+    plt.savefig('outputs/catalogue_valuation.png', dpi=200,
+                bbox_inches='tight', facecolor=BG)
+    plt.close()
+    print("\nSaved: outputs/valuation_26tracks.csv")
+    print("Saved: outputs/catalogue_valuation.png")
+
+
+if __name__ == "__main__":
+    main()
